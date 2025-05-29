@@ -18,7 +18,6 @@ tokenizer = AutoTokenizer.from_pretrained(model_name)
 model = AutoModelForCausalLM.from_pretrained(
     model_name,
     device_map="auto",
-    load_in_4bit=True,
     torch_dtype="auto",
 )
 
