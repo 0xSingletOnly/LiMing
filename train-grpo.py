@@ -114,7 +114,7 @@ def equation_reward_func(
                             break
             
             if not equation_content:
-                print(f"Debug: No equation found in: {completion_text_stripped[:100]}... for target {target_str}")
+                print(f"Debug: No equation found in: {completion_text_stripped[:50] + '...' + completion_text_stripped[-50:]}... for target {target_str}")
                 rewards.append(current_reward)
                 continue
 
@@ -186,17 +186,17 @@ def equation_reward_func(
                 if abs(float(result) - target_val_float) < FLOAT_COMPARISON_TOLERANCE:
                     if has_correct_format:
                         current_reward = 1.0
-                        print(f"Debug: PERFECT! Correct format + correct answer = 1.0 for target {target_str}")
+                        print(f"Debug: PERFECT! Correct format + correct answer = reward of 1.0 for target {target_str}")
                     else:
                         current_reward = 0.6
-                        print(f"Debug: GOOD! Wrong format but correct answer = 0.6 for target {target_str}")
+                        print(f"Debug: GOOD! Wrong format but correct answer = reward of 0.6 for target {target_str}")
                 else:
                     if has_correct_format:
                         current_reward = 0.3
-                        print(f"Debug: PARTIAL! Correct format but wrong answer ({result} vs {target_val_float}) = 0.3 for target {target_str}")
+                        print(f"Debug: PARTIAL! Correct format but wrong answer ({result} vs {target_val_float}) = reward of 0.3 for target {target_str}")
                     else:
                         current_reward = 0.0
-                        print(f"Debug: BAD! Wrong format + wrong answer = 0.0 for target {target_str}")
+                        print(f"Debug: BAD! Wrong format + wrong answer = reward of 0.0 for target {target_str}")
             
             except ZeroDivisionError:
                 print(f"Debug: ZeroDivisionError for '{expression_part}' for target {target_str}")
@@ -211,7 +211,7 @@ def equation_reward_func(
             rewards.append(current_reward)
 
         except Exception as e:
-            print(f"Debug: Unexpected error in reward_func: {e} for completion {completion_text_stripped[:100]}")
+            print(f"Debug: Unexpected error in reward_func: {e} for completion {completion_text_stripped[:50] + '...' + completion_text_stripped[-50:]}")
             rewards.append(0.0)
     return rewards
 
@@ -220,7 +220,8 @@ model_config = ModelConfig(
     model_name_or_path=model_name,
     torch_dtype="bfloat16", # string is fine for ModelConfig
     use_peft=True,          # GRPOTrainer will handle PEFT model setup
-    load_in_4bit=True
+    load_in_4bit=True,
+    attn_implementation="flash_attention_2",
 )
 
 peft_config = LoraConfig(
@@ -244,9 +245,9 @@ peft_config = LoraConfig(
 
 training_args = GRPOConfig(
     output_dir="qwen3-0.6b-grpo-countdown-tasks",
-    learning_rate=5e-6,
+    learning_rate=5e-7,
     lr_scheduler_type="cosine",
-    logging_steps=4,
+    logging_steps=1,
     report_to="tensorboard",
     max_steps=100,
     per_device_train_batch_size=1,
@@ -254,7 +255,7 @@ training_args = GRPOConfig(
     gradient_checkpointing=True,
     gradient_checkpointing_kwargs={"use_reentrant": False}, 
     bf16=True,
-    max_prompt_length=512,    
+    max_prompt_length=256,    
     max_completion_length=1024, 
     num_generations=2,
     beta=0.001,
