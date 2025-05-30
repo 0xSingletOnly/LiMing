@@ -15,11 +15,6 @@ login(token=os.environ.get("HF_TOKEN"), add_to_git_credential=True)
 # MODEL SETUP
 model_name = "Qwen/Qwen3-0.6B"
 tokenizer = AutoTokenizer.from_pretrained(model_name)
-model = AutoModelForCausalLM.from_pretrained(
-    model_name,
-    device_map="auto",
-    torch_dtype="auto",
-)
 
 # DATASET SETUP
 dataset_id = "Jiayi-Pan/Countdown-Tasks-3to4"
@@ -53,7 +48,7 @@ test_dataset = train_test_split["test"]
 # It ensures <think> and <answer> are direct children and not nested within each other incorrectly.
 # The part ((?:(?!<\/think>).)*) captures content within <think> non-greedily.
 # The part ((?:(?!<\/answer>).)*) captures content within <answer> non-greedily.
-FORMAT_REGEX_PATTERN = r"^<think>((?:(?!<\/think>).)*)<\/think>\n<answer>((?:(?!<\/answer>).)*)<\/answer>$"
+FORMAT_REGEX_PATTERN = r"^<think>((?:(?!<\/think>).)*)<\/think>\s*<answer>((?:(?!<\/answer>).)*)<\/answer>$"
 FORMAT_REGEX = re.compile(FORMAT_REGEX_PATTERN, re.DOTALL)
 
 # Regex to extract content from <answer> tag
@@ -89,6 +84,7 @@ def format_reward_func(completions: list[str], **kwargs) -> list[float]:
     rewards = []
     for completion_text in completions:
         try:
+            completion_text = completion_text.strip()  # Clean up whitespace
             # The completion_text itself is expected to be the full string
             match = FORMAT_REGEX.search(completion_text)
 
@@ -96,10 +92,10 @@ def format_reward_func(completions: list[str], **kwargs) -> list[float]:
                 # Both <think> and <answer> content captured
                 rewards.append(1.0)
             else:
-                # logger.debug(f"Format mismatch for: {completion_text}")
+                print(f"Debug: Format mismatch for: {completion_text}")
                 rewards.append(0.0)
         except Exception as e:
-            # logger.error(f"Error processing completion for format check: {completion_text}, Error: {e}")
+            print(f"Debug: Error processing completion for format check: {completion_text}, Error: {e}")
             rewards.append(0.0)
     return rewards
 
@@ -110,102 +106,92 @@ def equation_reward_func(
     nums: list[list[str]],
     **kwargs
 ) -> list[float]:
-    """
-    Evaluates completions based on:
-    1. Presence of a valid <answer>...</answer> tag within the completion.
-    2. Mathematical correctness of the equation in the <answer> tag.
-    3. Usage of all numbers from the `nums_list` exactly once in the equation.
-    4. Equation only contains allowed characters (numbers, operators, parentheses, whitespace).
-
-    The model is expected to generate the full string including the opening <think> tag.
-
-    Args:
-        completions (list[str]): Generated outputs from the assistant, each expected to
-                                 start with "<think>" and contain an <answer> tag.
-                                 Example: "<think>The equation is 2*3.</think>\n<answer>2*3</answer>"
-        targets (list[str]): Expected numerical answers (as strings).
-        nums_list (list[list[str]]): For each completion, a list of available numbers (as strings)
-                                     that must be used in the equation. Example: [["2", "3"], ["1", "5", "7"]]
-        **kwargs: Additional keyword arguments (ignored by this function).
-
-    Returns:
-        list[float]: Reward scores (1.0 for correct, 0.0 otherwise).
-    """
     rewards = []
     for completion_text, target_str, available_nums_str in zip(completions, target, nums):
         try:
-            current_reward = 0.0 # Default to 0.0, set to 1.0 only on full success
+            current_reward = 0.0 
 
-            # The completion_text itself is expected to be the full string
             answer_match = ANSWER_REGEX.search(completion_text)
             if not answer_match:
-                # logger.debug(f"No <answer> tag in: {completion_text}")
                 rewards.append(current_reward)
                 continue
 
-            equation_str = answer_match.group(1).strip()
-            if not equation_str: # Handle empty answer
-                # logger.debug(f"Empty <answer> content in: {completion_text}")
+            full_answer_content = answer_match.group(1).strip()
+            if not full_answer_content:
                 rewards.append(current_reward)
                 continue
 
-            # 1. Check for allowed characters in the equation
-            if not ALLOWED_EQUATION_CHARS_REGEX.match(equation_str):
-                # logger.debug(f"Equation '{equation_str}' contains forbidden characters.")
+            # Try to split "expression = result"
+            parts = full_answer_content.rsplit('=', 1)
+            expression_part_str = parts[0].strip()
+            
+            # It's possible the model only gives the expression, or gives something else.
+            # If no '=', the whole thing is the expression.
+            if len(parts) == 1: # No '=' found or it's at the very beginning
+                expression_part_str = full_answer_content 
+            elif not expression_part_str: # Handles cases like "= 138"
+                rewards.append(current_reward) # Invalid format if expression is empty
+                continue
+
+
+            if not expression_part_str: # Handle empty expression after split
                 rewards.append(current_reward)
                 continue
 
-            # 2. Check number usage
+            # 1. Check for allowed characters in the EXPRESSION PART
+            if not ALLOWED_EQUATION_CHARS_REGEX.match(expression_part_str):
+                print(f"Debug: Expression '{expression_part_str}' contains forbidden characters.")
+                rewards.append(current_reward)
+                continue
+
+            # 2. Check number usage (using expression_part_str)
             try:
                 expected_numbers_int = sorted([int(n) for n in available_nums_str])
             except ValueError:
-                # logger.error(f"Invalid non-integer number in available_nums_str: {available_nums_str}")
                 rewards.append(current_reward)
                 continue
 
-            used_numbers_str = re.findall(r'\d+', equation_str)
+            used_numbers_str = re.findall(r'\d+', expression_part_str) # Check numbers in expression only
             try:
                 used_numbers_int = sorted([int(n) for n in used_numbers_str])
             except ValueError:
-                # logger.debug(f"Invalid number format in equation '{equation_str}'.")
                 rewards.append(current_reward)
                 continue
 
             if used_numbers_int != expected_numbers_int:
-                # logger.debug(f"Number usage mismatch. Used: {used_numbers_int}, Expected: {expected_numbers_int} in '{equation_str}'")
+                print(f"Debug: Number usage mismatch. Used: {used_numbers_int}, Expected: {expected_numbers_int} in '{expression_part_str}'")
                 rewards.append(current_reward)
                 continue
 
-            # 3. Evaluate the equation and check correctness
+            # 3. Evaluate the EXPRESSION PART and check correctness against target_str
             try:
                 target_val = float(target_str)
-                eval_globals = {"__builtins__": {}}
+                eval_globals = {"__builtins__": {}} 
                 eval_locals = {}
-                result = eval(equation_str, eval_globals, eval_locals)
+                result = eval(expression_part_str, eval_globals, eval_locals) # Evaluate only the expression
 
                 if abs(float(result) - target_val) < FLOAT_COMPARISON_TOLERANCE:
                     current_reward = 1.0
                 # else:
-                    # logger.debug(f"Equation result mismatch. Eq: '{equation_str}' -> {result}, Target: {target_val}")
+                    print(f"Debug: Equation result mismatch. Eq: '{expression_part_str}' -> {result}, Target: {target_val}")
             except SyntaxError:
-                # logger.debug(f"Syntax error in equation: {equation_str}")
-                pass # current_reward remains 0.0
+                print(f"Debug: Syntax error in expression: {expression_part_str}")
+                pass 
             except TypeError:
-                # logger.debug(f"Type error during evaluation (e.g. trying to operate on non-numerics): {equation_str}")
-                pass # current_reward remains 0.0
+                pass 
             except ZeroDivisionError:
-                # logger.debug(f"Zero division error in equation: {equation_str}")
-                pass # current_reward remains 0.0
+                pass 
             except Exception as eval_e:
-                # logger.warning(f"Unexpected error evaluating equation '{equation_str}': {eval_e}")
-                pass # current_reward remains 0.0
+                print(f"Debug: Unexpected error evaluating expression '{expression_part_str}': {eval_e}")
+                pass 
 
             rewards.append(current_reward)
 
         except Exception as e:
-            # logger.error(f"Outer error processing completion for equation check: {completion_text}, Error: {e}")
             rewards.append(0.0)
+
     return rewards
+
 
 model_config = ModelConfig(
     model_name_or_path=model_name,
@@ -237,10 +223,11 @@ peft_config = LoraConfig(
 )
 
 training_args = GRPOConfig(
-    output_dir="qwen-r1-aha-countdown-tasks",
+    output_dir="qwen0.6-grpo-countdown-tasks",
     learning_rate=5e-7,
     lr_scheduler_type="cosine",
     logging_steps=10,
+    report_to="tensorboard",
     max_steps=100,
     per_device_train_batch_size=1,
     gradient_accumulation_steps=2,
