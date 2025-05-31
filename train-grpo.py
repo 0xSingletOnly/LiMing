@@ -18,7 +18,7 @@ tokenizer = AutoTokenizer.from_pretrained(model_name)
 # DATASET SETUP
 dataset_id = "Jiayi-Pan/Countdown-Tasks-3to4"
 dataset = load_dataset(dataset_id, split="train")
-dataset = dataset.shuffle().select(range(100))
+dataset = dataset.shuffle().select(range(1000))
 
 def generate_r1_prompt(example):
     numbers_list = example["nums"]
@@ -67,24 +67,7 @@ ALLOWED_EQUATION_CHARS_REGEX = re.compile(ALLOWED_EQUATION_CHARS_PATTERN)
 FLOAT_COMPARISON_TOLERANCE = 1e-5
 
 
-def format_reward_func(completions: list[str], **kwargs) -> list[float]:
-    rewards = []
-    for completion_text in completions:
-        try:
-            completion_text_stripped = completion_text.strip()
-            format_match = FORMAT_REGEX.search(completion_text_stripped)
-            if format_match and len(format_match.groups()) == 2:
-                rewards.append(1.0)
-            else:
-                print(f"Debug: Format mismatch for: {completion_text_stripped[:100]}...")
-                rewards.append(0.0)
-        except Exception as e:
-            print(f"Debug: Error processing completion for format check: {e}")
-            rewards.append(0.0)
-    return rewards
-
-
-def equation_reward_func(
+def reward_func(
     completions: list[str],
     target: list[str],  # List of target strings
     nums: list[list[str]],  # List of (list of available number strings)
@@ -263,7 +246,7 @@ training_args = GRPOConfig(
 
 trainer = GRPOTrainer(
     model=model_config.model_name_or_path,
-    reward_funcs=[format_reward_func, equation_reward_func],
+    reward_funcs=[reward_func],
     args=training_args,
     train_dataset=train_dataset,
     eval_dataset=test_dataset,
