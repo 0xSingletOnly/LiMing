@@ -245,11 +245,11 @@ peft_config = LoraConfig(
 
 training_args = GRPOConfig(
     output_dir="qwen3-0.6b-grpo-countdown-tasks",
-    learning_rate=5e-7,
+    learning_rate=5e-6,
     lr_scheduler_type="cosine",
-    logging_steps=1,
+    logging_steps=5,
     report_to="tensorboard",
-    max_steps=100,
+    max_steps=500,
     per_device_train_batch_size=1,
     gradient_accumulation_steps=2, 
     gradient_checkpointing=True,
