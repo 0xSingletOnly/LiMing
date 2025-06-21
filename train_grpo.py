@@ -12,13 +12,13 @@ from peft import LoraConfig
 login(token=os.environ.get("HF_TOKEN"), add_to_git_credential=True)
 
 # MODEL SETUP
-model_name = "Qwen/Qwen3-0.6B"
+model_name = "Qwen/Qwen3-1.7B"
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 
 # DATASET SETUP
 dataset_id = "Jiayi-Pan/Countdown-Tasks-3to4"
 dataset = load_dataset(dataset_id, split="train")
-dataset = dataset.shuffle().select(range(1000))
+dataset = dataset.select(range(10000))
 
 def generate_r1_prompt(example):
     numbers_list = example["nums"]
@@ -32,6 +32,10 @@ def generate_r1_prompt(example):
             "role": "user",
             "content": f"Given the numbers {numbers_list} and the target number {target_val}, please provide a solution to reach the target number using the four basic arithmetic operations: addition, subtraction, multiplication, and division (+, -, *, /). You can use each number only once. Show your work in <think> </think> tags. And return the final equation and answer in <answer> </answer> tags, for example <answer> (1 + 2) / 3 = 1 </answer>."
         },
+        {
+            "role": "assistant",
+            "content": "Let me solve this step by step.\n<think>"
+        },
     ]
     return {
         "prompt": tokenizer.apply_chat_template(r1_prefix, tokenize=False, add_generation_prompt=True),
@@ -41,7 +45,7 @@ def generate_r1_prompt(example):
 
 dataset = dataset.map(generate_r1_prompt)
 
-train_test_split = dataset.train_test_split(test_size=0.1, seed=42) # Added seed
+train_test_split = dataset.shuffle().train_test_split(test_size=0.1) 
 train_dataset = train_test_split["train"]
 test_dataset = train_test_split["test"]
 
@@ -66,138 +70,82 @@ ALLOWED_EQUATION_CHARS_REGEX = re.compile(ALLOWED_EQUATION_CHARS_PATTERN)
 # Tolerance for float comparisons
 FLOAT_COMPARISON_TOLERANCE = 1e-5
 
-
 def reward_func(
     completions: list[str],
-    target: list[str],  # List of target strings
-    nums: list[list[str]],  # List of (list of available number strings)
+    target: list[str],
+    nums: list[list[str]],
     **kwargs
 ) -> list[float]:
     rewards = []
     for completion_text, target_str, current_available_nums_str in zip(completions, target, nums):
         try:
-            current_reward = 0.0
+            current_reward = 0.0 # Default to zero
             has_correct_format = False
             equation_content = None
-            
+
+            completion_text = "<think>" + completion_text 
             completion_text_stripped = completion_text.strip()
             format_match = FORMAT_REGEX.search(completion_text_stripped)
+            
+            # 1. First, check for the correct format
             if format_match and len(format_match.groups()) == 2:
                 has_correct_format = True
                 equation_content = format_match.group(2).strip()
-                print(f"Debug: Perfect format detected, equation content: '{equation_content}' for target {target_str}")
             else:
+                # Fallback to extract equation from imperfect format
                 for regex in EQUATION_REGEXES:
                     match = regex.search(completion_text_stripped)
-                    if match:
-                        raw_extracted_content = match.group(1)
-                        if raw_extracted_content: # Ensure group(1) actually captured something
-                            equation_content = raw_extracted_content.strip()
-                            print(f"Debug: Imperfect format, extracted: '{equation_content}' for target {target_str}")
-                            break
+                    if match and match.group(1):
+                        equation_content = match.group(1).strip()
+                        break
             
             if not equation_content:
-                print(f"Debug: No equation found in: {completion_text_stripped[:50] + '...' + completion_text_stripped[-50:]}... for target {target_str}")
-                rewards.append(current_reward)
+                rewards.append(0.0)
                 continue
 
-            equation_lines = equation_content.split('\n')
-            math_expression = None
-            for line in equation_lines:
-                line = line.strip()
-                if not line:
-                    continue
-                if re.search(r'[\d+\-*/()]', line):
-                    math_expression = line
-                    break
-            
-            if not math_expression:
-                math_expression = equation_content # Use the full (stripped) content if no specific line found
-            
-            expression_part = ""
-            if '=' in math_expression:
-                expression_part = math_expression.split('=')[0].strip()
-            else:
-                expression_part = math_expression.strip()
-            
-            expression_part = re.sub(r'[.]+$', '', expression_part).strip() # Remove trailing periods
-            
-            if not expression_part:
-                print(f"Debug: Expression part is empty after cleaning: '{math_expression}' for target {target_str}")
-                rewards.append(current_reward)
+            # 2. Extract and clean the mathematical expression
+            expression_part = equation_content.split('=')[0].strip()
+            if not expression_part or not ALLOWED_EQUATION_CHARS_REGEX.match(expression_part.replace(' ', '')):
+                rewards.append(0.0)
                 continue
 
-            print(f"Debug: Expression to evaluate: '{expression_part}' for target {target_str}")
-
-            if not ALLOWED_EQUATION_CHARS_REGEX.match(expression_part.replace(' ', '')):
-                print(f"Debug: Expression contains forbidden characters: '{expression_part}' for target {target_str}")
-                rewards.append(current_reward)
-                continue
-
+            # 3. Verify number usage
             try:
                 expected_numbers_int = sorted([int(n) for n in current_available_nums_str])
-                
-                # Extract numbers from expression_part
-                temp_expr = expression_part
-                for op in ['+', '-', '*', '/', '(', ')']: # Replace ops with space for splitting
-                    temp_expr = temp_expr.replace(op, ' ')
-                
-                used_numbers_str_list = []
-                for item in temp_expr.split(' '):
-                    item_s = item.strip()
-                    if item_s.isdigit():
-                         used_numbers_str_list.append(item_s)
-                
+                temp_expr = expression_part.replace('(', ' ').replace(')', ' ')
+                used_numbers_str_list = [item for item in re.split(r'[+\-*/\s]', temp_expr) if item.isdigit()]
                 used_numbers_int = sorted([int(n) for n in used_numbers_str_list])
 
-            except ValueError as e:
-                print(f"Debug: Error parsing numbers ({e}) for expr '{expression_part}', available '{current_available_nums_str}' for target {target_str}")
-                rewards.append(current_reward)
+                if used_numbers_int != expected_numbers_int:
+                    rewards.append(0.0) # Penalty for using wrong numbers
+                    continue
+            except (ValueError, IndexError):
+                rewards.append(0.0)
                 continue
 
-            if used_numbers_int != expected_numbers_int:
-                print(f"Debug: Number usage mismatch. Used: {used_numbers_int}, Expected: {expected_numbers_int} (from {current_available_nums_str}) in '{expression_part}' for target {target_str}")
-                rewards.append(current_reward)
-                continue
-
+            # 4. Evaluate the expression and assign reward ONLY if correct
             try:
                 target_val_float = float(target_str)
-                result = eval(expression_part, {"__builtins__": {}}, {}) 
+                result = eval(expression_part, {"__builtins__": {}}, {})
                 
-                print(f"Debug: Eval: '{expression_part}' = {result}, Target: {target_val_float}, Format OK: {has_correct_format}")
-
                 if abs(float(result) - target_val_float) < FLOAT_COMPARISON_TOLERANCE:
+                    # The answer is correct. Now check format for bonus.
                     if has_correct_format:
-                        current_reward = 1.0
-                        print(f"Debug: PERFECT! Correct format + correct answer = reward of 1.0 for target {target_str}")
+                        current_reward = 1.0 # Perfect: Correct answer AND format
                     else:
-                        current_reward = 0.6
-                        print(f"Debug: GOOD! Wrong format but correct answer = reward of 0.6 for target {target_str}")
-                else:
-                    if has_correct_format:
-                        current_reward = 0.3
-                        print(f"Debug: PARTIAL! Correct format but wrong answer ({result} vs {target_val_float}) = reward of 0.3 for target {target_str}")
-                    else:
-                        current_reward = 0.0
-                        print(f"Debug: BAD! Wrong format + wrong answer = reward of 0.0 for target {target_str}")
-            
-            except ZeroDivisionError:
-                print(f"Debug: ZeroDivisionError for '{expression_part}' for target {target_str}")
-                current_reward = 0.1 if has_correct_format else 0.0
-            except SyntaxError:
-                print(f"Debug: SyntaxError for '{expression_part}' for target {target_str}")
-                current_reward = 0.1 if has_correct_format else 0.0
-            except Exception as eval_e:
-                print(f"Debug: Error evaluating expression '{expression_part}': {eval_e} for target {target_str}")
-                current_reward = 0.1 if has_correct_format else 0.0
+                        current_reward = 0.8 # Good: Correct answer, wrong format
+                # If the answer is wrong, the reward remains 0.0, regardless of format.
+                
+            except (SyntaxError, ZeroDivisionError, NameError, TypeError):
+                # Any evaluation error results in zero reward
+                current_reward = 0.0
             
             rewards.append(current_reward)
 
         except Exception as e:
-            print(f"Debug: Unexpected error in reward_func: {e} for completion {completion_text_stripped[:50] + '...' + completion_text_stripped[-50:]}")
+            print(f"Debug: Unexpected error in reward_func: {e}")
             rewards.append(0.0)
     return rewards
-
 
 model_config = ModelConfig(
     model_name_or_path=model_name,
@@ -227,20 +175,20 @@ peft_config = LoraConfig(
 )
 
 training_args = GRPOConfig(
-    output_dir="qwen3-0.6b-grpo-countdown-tasks",
-    learning_rate=5e-6,
+    output_dir="qwen3-1.7b-grpo-countdown-tasks-v1",
+    learning_rate=5e-7,
     lr_scheduler_type="cosine",
     logging_steps=5,
     report_to="tensorboard",
-    max_steps=500,
-    per_device_train_batch_size=1,
-    gradient_accumulation_steps=2, 
+    max_steps=1125, # 9000 (train_samples) / 24 (global_batch_size) * 1 (num_epochs)
+    per_device_train_batch_size=8,
+    gradient_accumulation_steps=1, 
     gradient_checkpointing=True,
     gradient_checkpointing_kwargs={"use_reentrant": False}, 
     bf16=True,
     max_prompt_length=256,    
     max_completion_length=1024, 
-    num_generations=2,
+    num_generations=4,
     beta=0.001,
 )
 
